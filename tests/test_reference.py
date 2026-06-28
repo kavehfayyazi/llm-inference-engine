@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from engine.config import EngineConfig
-from engine.generate import _eos_ids, generate
+from engine.generate import _eos_ids, generate, generate_cached
 from engine.model import load
 
 PROMPTS = [
@@ -39,11 +39,9 @@ def first_divergence(a, b):
     return None if len(a) == len(b) else min(len(a), len(b))
 
 
-@torch.no_grad()
-def test_reference_match():
-    lm = load(EngineConfig())
+def _assert_matches_hf(lm, gen_fn):
     for prompt in PROMPTS:
-        ours, _ = generate(lm, prompt, max_new_tokens=MAX_NEW)
+        ours, _ = gen_fn(lm, prompt, max_new_tokens=MAX_NEW)
         ours = ours[0].tolist()
         hf = hf_greedy_ids(lm, prompt)
         i = first_divergence(ours, hf)
@@ -54,6 +52,18 @@ def test_reference_match():
         )
 
 
+@torch.no_grad()
+def test_reference_match():
+    _assert_matches_hf(load(EngineConfig()), generate)
+
+
+@torch.no_grad()
+def test_cached_reference_match():
+    _assert_matches_hf(load(EngineConfig()), generate_cached)
+
+
 if __name__ == "__main__":
-    test_reference_match()
-    print(f"REFERENCE OK: {len(PROMPTS)} prompts match HF greedy")
+    lm = load(EngineConfig())
+    _assert_matches_hf(lm, generate)
+    _assert_matches_hf(lm, generate_cached)
+    print(f"REFERENCE OK: naive + cached match HF greedy on {len(PROMPTS)} prompts")
