@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from engine.config import EngineConfig
-from engine.generate import _eos_ids, generate, generate_cached
+from engine.generate import _eos_ids, generate, generate_cached, generate_paged
 from engine.model import load
 
 PROMPTS = [
@@ -62,8 +62,14 @@ def test_cached_reference_match():
     _assert_matches_hf(load(EngineConfig()), generate_cached)
 
 
+@torch.no_grad()
+def test_paged_reference_match():
+    _assert_matches_hf(load(EngineConfig()), generate_paged)
+
+
 if __name__ == "__main__":
     lm = load(EngineConfig())
     _assert_matches_hf(lm, generate)
     _assert_matches_hf(lm, generate_cached)
-    print(f"REFERENCE OK: naive + cached match HF greedy on {len(PROMPTS)} prompts")
+    _assert_matches_hf(lm, generate_paged)
+    print(f"REFERENCE OK: naive + cached + paged match HF greedy on {len(PROMPTS)} prompts")

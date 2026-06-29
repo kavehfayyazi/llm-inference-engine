@@ -13,3 +13,5 @@ class EngineConfig:
     dtype: str = "auto"
     # Greedy-decode length cap.
     max_new_tokens: int = 32
+    # Tokens per KV block (paged path).
+    block_size: int = 16
