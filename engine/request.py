@@ -27,6 +27,8 @@ class Request:
     last_token: int = None          # most recent token, fed next step
     generated: list = field(default_factory=list)
     state: State = State.WAITING
+    t_first: float = None           # wall seconds at first token (prefill done)
+    t_finish: float = None          # wall seconds at completion
 
     def full_ids(self) -> list:
         # Prompt + generated token ids.

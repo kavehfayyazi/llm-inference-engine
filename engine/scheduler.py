@@ -7,6 +7,7 @@ from collections import deque
 from engine.batch import decode_step, prefill
 from engine.blocks import BlockPool
 from engine.generate import _eos_ids
+from engine.metrics import now
 from engine.model import LoadedModel
 from engine.request import State
 
@@ -19,18 +20,36 @@ class Scheduler:
         self.pool = pool
         self.max_batch = max_batch
         self.eos_ids = _eos_ids(lm)
+        self._start = 0.0
 
     def finished(self, req) -> bool:
         return req.last_token in self.eos_ids or len(req.generated) >= req.max_new
 
+    def _elapsed(self) -> float:
+        return now(self.lm.device) - self._start
+
     def _admit(self, req, done):
-        # Prefill (emits first token); route to running or done.
+        # Prefill (emits first token); stamp first-token time; route.
         prefill(self.lm, self.pool, req)
+        req.t_first = self._elapsed()
         if self.finished(req):
             req.state = State.DONE
+            req.t_finish = self._elapsed()
             done.append(req)
             return False
         return True
+
+    def _drain_finished(self, running, done):
+        # Stamp + move finished requests out of the running set.
+        still = []
+        for r in running:
+            if self.finished(r):
+                r.state = State.DONE
+                r.t_finish = self._elapsed()
+                done.append(r)
+            else:
+                still.append(r)
+        return still
 
     def _run_to_completion(self, batch, done, step):
         # Whole-batch execution: decode until every request finishes.
@@ -38,13 +57,13 @@ class Scheduler:
         while running:
             decode_step(self.lm, self.pool, running)
             step += 1
-            done.extend(r for r in running if self.finished(r))
-            running = [r for r in running if not self.finished(r)]
+            running = self._drain_finished(running, done)
         return step
 
 
 class StaticScheduler(Scheduler):
     def run(self, requests):
+        self._start = now(self.lm.device)
         ready = deque(sorted(requests, key=lambda r: r.arrival))
         done, step, batches = [], 0, 0
         while ready:
@@ -57,7 +76,7 @@ class StaticScheduler(Scheduler):
                 batch.append(ready.popleft())
             step = self._run_to_completion(batch, done, step)
             batches += 1
-        return done, {"steps": step, "batches": batches}
+        return done, {"steps": step, "batches": batches, "wall_s": self._elapsed()}
 
 
 class DynamicScheduler(Scheduler):
@@ -66,6 +85,7 @@ class DynamicScheduler(Scheduler):
         self.timeout = timeout
 
     def run(self, requests):
+        self._start = now(self.lm.device)
         ready = deque(sorted(requests, key=lambda r: r.arrival))
         done, step, batches = [], 0, 0
         while ready:
@@ -84,11 +104,12 @@ class DynamicScheduler(Scheduler):
                 batch.append(ready.popleft())
             step = self._run_to_completion(batch, done, step)
             batches += 1
-        return done, {"steps": step, "batches": batches}
+        return done, {"steps": step, "batches": batches, "wall_s": self._elapsed()}
 
 
 class ContinuousScheduler(Scheduler):
     def run(self, requests):
+        self._start = now(self.lm.device)
         ready = deque(sorted(requests, key=lambda r: r.arrival))
         running, done, step = [], [], 0
         while ready or running:
@@ -102,9 +123,8 @@ class ContinuousScheduler(Scheduler):
                 continue
             decode_step(self.lm, self.pool, running)
             step += 1
-            done.extend(r for r in running if self.finished(r))
-            running = [r for r in running if not self.finished(r)]
-        return done, {"steps": step}
+            running = self._drain_finished(running, done)
+        return done, {"steps": step, "wall_s": self._elapsed()}
 
 
 _SCHEDULERS = {
