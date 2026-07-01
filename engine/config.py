@@ -17,3 +17,5 @@ class EngineConfig:
     block_size: int = 16
     # Paged decode read path: "reference" (gather+SDPA) or "triton" (kernel).
     attention_backend: str = "reference"
+    # Batching policy: "continuous" (default), "dynamic", or "static".
+    scheduler: str = "continuous"

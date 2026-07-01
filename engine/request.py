@@ -22,6 +22,7 @@ class Request:
     prompt_ids: torch.Tensor        # [1, P]
     kv: PagedKVCache
     max_new: int
+    arrival: int = 0                # step tick the request shows up
     pos: int = 0                    # tokens whose KV is cached
     last_token: int = None          # most recent token, fed next step
     generated: list = field(default_factory=list)
