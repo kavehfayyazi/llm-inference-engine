@@ -17,7 +17,7 @@ from tests.test_reference import MAX_NEW, PROMPTS, first_divergence, hf_greedy_i
 
 def main():
     assert torch.cuda.is_available(), "triton kernel needs CUDA; run this on a GPU box"
-    lm = load(EngineConfig())
+    lm = load(EngineConfig(dtype="float32"))
 
     for prompt in PROMPTS:
         lm.cfg.attention_backend = "reference"

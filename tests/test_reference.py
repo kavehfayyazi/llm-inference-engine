@@ -54,21 +54,21 @@ def _assert_matches_hf(lm, gen_fn):
 
 @torch.no_grad()
 def test_reference_match():
-    _assert_matches_hf(load(EngineConfig()), generate)
+    _assert_matches_hf(load(EngineConfig(dtype="float32")), generate)
 
 
 @torch.no_grad()
 def test_cached_reference_match():
-    _assert_matches_hf(load(EngineConfig()), generate_cached)
+    _assert_matches_hf(load(EngineConfig(dtype="float32")), generate_cached)
 
 
 @torch.no_grad()
 def test_paged_reference_match():
-    _assert_matches_hf(load(EngineConfig()), generate_paged)
+    _assert_matches_hf(load(EngineConfig(dtype="float32")), generate_paged)
 
 
 if __name__ == "__main__":
-    lm = load(EngineConfig())
+    lm = load(EngineConfig(dtype="float32"))
     _assert_matches_hf(lm, generate)
     _assert_matches_hf(lm, generate_cached)
     _assert_matches_hf(lm, generate_paged)
