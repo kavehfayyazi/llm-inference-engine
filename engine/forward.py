@@ -8,7 +8,7 @@ from engine.attention import attention
 from engine.blocks import BlockPool, PagedKVCache
 from engine.cache import KVCache
 from engine.model import LoadedModel
-from engine.paged_attention import paged_attention_ref
+from engine.paged_attention import paged_attention
 
 
 @torch.no_grad()
@@ -60,7 +60,7 @@ def forward_paged(lm: LoadedModel, input_ids: torch.Tensor, pool: BlockPool, req
     for i, layer in enumerate(base.layers):
         residual = hidden
         h = layer.input_layernorm(hidden)
-        h = paged_attention_ref(h, layer.self_attn, cos, sin, dims, pool, req, i, start_pos)
+        h = paged_attention(h, layer.self_attn, cos, sin, dims, pool, req, i, start_pos, lm.cfg.attention_backend)
         hidden = residual + h
 
         residual = hidden

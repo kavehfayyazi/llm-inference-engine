@@ -1,4 +1,4 @@
-"""Reference paged attention: write k/v into blocks, gather them, run SDPA."""
+"""Paged attention: write k/v into blocks, then read via gather (ref) or kernel."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from engine.attention import apply_rope, repeat_kv
 from engine.blocks import BlockPool, PagedKVCache
 from engine.model import ArchDims
+from engine.triton_paged_attention import paged_decode
 
 
 def _write(pool: BlockPool, req: PagedKVCache, layer: int, k_new, v_new, start_pos: int):
@@ -22,15 +23,15 @@ def _write(pool: BlockPool, req: PagedKVCache, layer: int, k_new, v_new, start_p
 def _gather(pool: BlockPool, req: PagedKVCache, layer: int, total: int):
     # Pull this request's blocks back into one ordered [1, n_kv, total, head_dim].
     bs = pool.block_size
-    n_kv, _, head_dim = pool.k[layer].shape[1], bs, pool.k[layer].shape[3]
+    n_kv, head_dim = pool.k[layer].shape[1], pool.k[layer].shape[3]
     table = torch.tensor(req.block_table, device=pool.k[layer].device)
     k = pool.k[layer][table].permute(1, 0, 2, 3).reshape(n_kv, -1, head_dim)[:, :total]
     v = pool.v[layer][table].permute(1, 0, 2, 3).reshape(n_kv, -1, head_dim)[:, :total]
     return k.unsqueeze(0), v.unsqueeze(0)
 
 
-def paged_attention_ref(hidden, attn_module, cos, sin, dims: ArchDims, pool, req, layer, start_pos):
-    # One layer of paged self-attention via gather + SDPA.
+def paged_attention(hidden, attn_module, cos, sin, dims: ArchDims, pool, req, layer, start_pos, backend="reference"):
+    # One layer of paged self-attention; decode may use the triton kernel.
     b, t, _ = hidden.shape
 
     q = attn_module.q_proj(hidden).view(b, t, dims.n_q_heads, dims.head_dim).transpose(1, 2)
@@ -41,13 +42,18 @@ def paged_attention_ref(hidden, attn_module, cos, sin, dims: ArchDims, pool, req
 
     _write(pool, req, layer, k, v, start_pos)
     total = start_pos + t
-    k_full, v_full = _gather(pool, req, layer, total)
+    is_decode = t == 1 and start_pos > 0
 
-    k_full = repeat_kv(k_full, dims.n_rep)
-    v_full = repeat_kv(v_full, dims.n_rep)
-
-    is_causal = start_pos == 0
-    out = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=is_causal)
+    if backend == "triton" and is_decode:
+        assert b == 1, "triton decode path is single-request for now"
+        out_heads = paged_decode(q[0, :, 0, :], pool.k[layer], pool.v[layer], req.block_table, total, dims.n_rep)
+        out = out_heads.view(1, dims.n_q_heads, 1, dims.head_dim)
+    else:
+        k_full, v_full = _gather(pool, req, layer, total)
+        k_full = repeat_kv(k_full, dims.n_rep)
+        v_full = repeat_kv(v_full, dims.n_rep)
+        is_causal = start_pos == 0
+        out = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=is_causal)
 
     out = out.transpose(1, 2).reshape(b, t, dims.n_q_heads * dims.head_dim)
     return attn_module.o_proj(out)

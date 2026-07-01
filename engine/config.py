@@ -15,3 +15,5 @@ class EngineConfig:
     max_new_tokens: int = 32
     # Tokens per KV block (paged path).
     block_size: int = 16
+    # Paged decode read path: "reference" (gather+SDPA) or "triton" (kernel).
+    attention_backend: str = "reference"
