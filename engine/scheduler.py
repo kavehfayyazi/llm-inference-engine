@@ -28,24 +28,27 @@ class Scheduler:
     def _elapsed(self) -> float:
         return now(self.lm.device) - self._start
 
-    def _admit(self, req, done):
-        # Prefill (emits first token); stamp first-token time; route.
+    def _admit(self, req, done, step):
+        # Prefill (emits first token); stamp first-token time/step; route.
         prefill(self.lm, self.pool, req)
         req.t_first = self._elapsed()
+        req.s_first = step
         if self.finished(req):
             req.state = State.DONE
             req.t_finish = self._elapsed()
+            req.s_finish = step
             done.append(req)
             return False
         return True
 
-    def _drain_finished(self, running, done):
+    def _drain_finished(self, running, done, step):
         # Stamp + move finished requests out of the running set.
         still = []
         for r in running:
             if self.finished(r):
                 r.state = State.DONE
                 r.t_finish = self._elapsed()
+                r.s_finish = step
                 done.append(r)
             else:
                 still.append(r)
@@ -53,11 +56,11 @@ class Scheduler:
 
     def _run_to_completion(self, batch, done, step):
         # Whole-batch execution: decode until every request finishes.
-        running = [r for r in batch if self._admit(r, done)]
+        running = [r for r in batch if self._admit(r, done, step)]
         while running:
             decode_step(self.lm, self.pool, running)
             step += 1
-            running = self._drain_finished(running, done)
+            running = self._drain_finished(running, done, step)
         return step
 
 
@@ -116,14 +119,14 @@ class ContinuousScheduler(Scheduler):
             # Top up the running set every step (token-level admission).
             while ready and len(running) < self.max_batch and ready[0].arrival <= step:
                 req = ready.popleft()
-                if self._admit(req, done):
+                if self._admit(req, done, step):
                     running.append(req)
             if not running:
                 step += 1  # nothing ready yet; advance to next arrival
                 continue
             decode_step(self.lm, self.pool, running)
             step += 1
-            running = self._drain_finished(running, done)
+            running = self._drain_finished(running, done, step)
         return done, {"steps": step, "wall_s": self._elapsed()}
 
 

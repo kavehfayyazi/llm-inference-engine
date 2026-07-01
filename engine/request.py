@@ -29,6 +29,8 @@ class Request:
     state: State = State.WAITING
     t_first: float = None           # wall seconds at first token (prefill done)
     t_finish: float = None          # wall seconds at completion
+    s_first: int = None             # scheduler step at first token
+    s_finish: int = None            # scheduler step at completion
 
     def full_ids(self) -> list:
         # Prompt + generated token ids.
