@@ -24,12 +24,15 @@ class BlockPool:
         self.k = [torch.zeros(shape, device=device, dtype=dtype) for _ in range(n_layers)]
         self.v = [torch.zeros(shape, device=device, dtype=dtype) for _ in range(n_layers)]
         self.free = list(range(num_blocks))
+        self.peak_used = 0  # high-water mark of concurrently held blocks
 
     def allocate(self) -> int:
         # Hand out one physical block id.
         if not self.free:
             raise RuntimeError("block pool exhausted")
-        return self.free.pop()
+        block_id = self.free.pop()
+        self.peak_used = max(self.peak_used, self.num_used)
+        return block_id
 
     def free_block(self, block_id: int):
         # Return one block id to the pool.

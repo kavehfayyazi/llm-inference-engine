@@ -37,6 +37,7 @@ class Scheduler:
             req.state = State.DONE
             req.t_finish = self._elapsed()
             req.s_finish = step
+            req.kv.release()  # free blocks back to the shared pool
             done.append(req)
             return False
         return True
@@ -49,6 +50,7 @@ class Scheduler:
                 r.state = State.DONE
                 r.t_finish = self._elapsed()
                 r.s_finish = step
+                r.kv.release()  # free blocks back to the shared pool
                 done.append(r)
             else:
                 still.append(r)
