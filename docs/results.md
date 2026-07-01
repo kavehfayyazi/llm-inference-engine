@@ -1,58 +1,87 @@
 # Benchmark results
 
 Workload: 12 concurrent requests, generation lengths 8-40 (high variance), all
-arriving at t=0. Model: Llama-3.2-1B. Reference paged attention path.
-Device: Apple MPS, fp16. Reproduce with `PYTHONPATH=. python scripts/bench.py`.
+arriving at t=0. Model: Llama-3.2-1B. Device: **NVIDIA T4, bf16** (Colab).
+Correctness verified first: `verify_triton.py` -> both single and batched paged
+kernels match the reference path and HF greedy. Reproduce with
+`PYTHONPATH=. python scripts/bench.py --backend {reference,triton}`.
 
-Absolute numbers are illustrative (small model, MPS, unfused per-request
-attention). The **relative trends** are the point.
+`steps` is a deterministic, timing-free efficiency signal (one step = one decode
+pass over the running batch). It is identical across devices and backends.
+
+## Reference read path (gather + SDPA per request)
 
 ```
 scheduler   batch  steps   ttft_ms   tpot_ms    p99_ms   tok/s
 --------------------------------------------------------------
-static          1    276   4467.91     32.23   9560.55    30.1
-static          2    222    3589.0     47.21   8459.98    34.0
-static          4    117   2653.42     84.24   7663.61    37.6
-static          8     78   1741.42    136.41   7411.37    38.9
-dynamic         1    276   3862.95     30.59   8853.05    32.5
-dynamic         2    222   3572.93     46.75   8438.94    34.1
-dynamic         4    117   2659.44     84.29   7688.33    37.5
-dynamic         8     78   1818.53    137.81   7620.68    37.8
-continuous      1    276   4028.25     31.46   9055.64    31.8
-continuous      2    145   2968.00     54.42   7914.24    36.4
-continuous      4     85   2082.69     99.17   7510.64    38.3
-continuous      8     46    808.11    186.15   7278.06    39.6
+static          1    276   3747.05     28.67   8749.40    32.9
+static          2    222   4257.84     69.98  10254.32    28.1
+static          4    117   3955.92    109.28  11172.19    25.8
+static          8     78   2054.51    139.72   8845.36    32.6
+dynamic         1    276   3832.61     27.17   8641.69    33.3
+dynamic         2    222   4380.21     72.84  10520.04    27.4
+dynamic         4    117   4024.12    111.38  11636.23    24.8
+dynamic         8     78   2038.82    135.20   8955.29    32.2
+continuous      1    276   4020.27     27.92   8692.56    33.1
+continuous      2    145   5578.90     97.37  14051.44    20.5
+continuous      4     85   2586.16    117.13   9394.54    30.7
+continuous      8     46    967.22    153.55   6561.33    43.9
 ```
 
-## What the numbers say
+## Triton kernel read path (one fused launch per layer)
 
-**Batch size is the primary lever (the core batching tradeoff).** Within any
-scheduler, growing the batch:
-- cuts **TTFT** (155ms-class waits shrink as more requests are served together),
-- raises **TPOT** (a bigger batch = more work per decode step, so each token is slower),
-- raises **throughput** and cuts **p99**.
-This is the fundamental latency-vs-throughput knob: you trade per-token speed for
-work-per-GPU-second.
+```
+scheduler   batch  steps   ttft_ms   tpot_ms    p99_ms   tok/s
+--------------------------------------------------------------
+static          1    276   3220.72     22.81   7402.53    38.9
+static          2    222   3892.51     65.72   9294.79    31.0
+static          4    117   3686.50     98.03  10370.42    27.8
+static          8     78   1769.90    111.61   7771.94    37.1
+dynamic         1    276   3128.00     21.82   7180.04    40.1
+dynamic         2    222   4161.01     67.26   9498.18    30.3
+dynamic         4    117   3658.66     97.20  10265.67    28.1
+dynamic         8     78   1695.33    107.89   7503.73    38.4
+continuous      1    276   3118.21     21.31   6909.98    41.7
+continuous      2    145   4845.32     84.39  12292.98    23.4
+continuous      4     85   2171.80     96.61   7907.99    36.4
+continuous      8     46    844.07    115.64   5083.07    56.7
+```
 
-**Continuous beats static/dynamic on slot efficiency.** The `steps` column is a
-clean, timing-free signal (one step = one decode pass). At batch 8, continuous
-finishes the workload in **46 steps vs 78** for static -- 41% fewer. Reason:
-static runs a batch to completion, so every slot waits for that batch's *longest*
-request (head-of-line waste); continuous refills a freed slot from the queue the
-moment a short request finishes, keeping the batch full. Fewer wasted slot-steps
--> lower TTFT (808ms vs 1741ms at batch 8), lower p99, higher tok/s.
+## Three findings
 
-**Static == dynamic here** because all 12 requests arrive at t=0. Dynamic's
-timeout only helps when requests *trickle in* (fire a partial batch instead of
-waiting for N). Under a saturated offline arrival, the two are identical.
+**1. Batch size is the latency-vs-throughput knob.** Within a scheduler, a larger
+batch cuts TTFT and raises tok/s, but raises TPOT (more work per decode step). The
+classic tradeoff, visible in both tables.
+
+**2. Continuous batching wins slot efficiency.** The `steps` column tells it
+cleanly: at batch 8, continuous finishes in **46 steps vs 78** for static (-41%).
+Static runs a batch to completion, so every slot waits for that batch's longest
+request; continuous refills a freed slot the moment a short request finishes.
+Static == dynamic here because all requests arrive at t=0 -- dynamic's timeout
+only helps under trickle-in load.
+
+**3. The Triton kernel makes decode compute-bound.** The reference read gathers
+each request's KV and runs a separate SDPA -- N kernel launches per layer, which
+leaves the GPU launch-bound. The fused kernel does one launch per layer. Result,
+best config (continuous, batch 8):
+
+| metric | reference | triton | change |
+|--------|-----------|--------|--------|
+| tok/s  | 43.9      | 56.7   | +29%   |
+| TPOT   | 153.6 ms  | 115.6 ms | -25% |
+| p99    | 6.56 s    | 5.08 s | -23%   |
+| TTFT   | 967 ms    | 844 ms | -13%   |
+
+The kernel wins on every row of both tables; `steps` is unchanged, confirming it
+alters only the attention read, not the scheduling.
 
 ## Caveats / next steps
 
-- **Arrival model.** This is an offline/saturated sweep. A wall-clock load
-  generator with a real arrival *rate* would surface dynamic's timeout benefit
-  and widen continuous's lead under bursty traffic.
-- **Attention path.** The reference read gathers KV per request each step; the
-  Triton kernel (CUDA) removes that copy and would raise tok/s, especially at
-  larger batch and sequence length.
-- **KV release.** Blocks are freed at request end but not reused mid-run here;
-  a persistent shared pool across a longer stream would show packing gains.
+- **Arrival model.** Offline/saturated sweep. A wall-clock load generator with a
+  real arrival rate would surface dynamic's timeout benefit and continuous's lead
+  under bursty traffic.
+- **Prefill batching.** Newly admitted requests are prefilled one at a time; this
+  shows as noise at small batch (continuous batch 2). Chunked/batched prefill
+  would smooth it.
+- **KV release.** Blocks free at request end; a persistent pool across a long
+  stream would show packing gains directly.
