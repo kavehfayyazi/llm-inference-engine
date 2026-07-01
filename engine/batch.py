@@ -25,6 +25,22 @@ def prefill(lm: LoadedModel, pool: BlockPool, req: Request):
 
 
 @torch.no_grad()
+def prefill_chunk(lm: LoadedModel, pool: BlockPool, req: Request, chunk_size: int) -> bool:
+    # Consume the next prompt chunk; return True once the prompt is fully prefilled.
+    ids = req.prompt_ids
+    end = min(req.prompt_pos + chunk_size, ids.shape[1])
+    logits = forward_paged(lm, ids[:, req.prompt_pos:end], pool, req.kv, start_pos=req.prompt_pos)
+    req.prompt_pos = end
+    if req.prompt_pos < ids.shape[1]:
+        return False
+    req.pos = ids.shape[1]
+    req.last_token = logits[0, -1, :].argmax().item()
+    req.generated.append(req.last_token)
+    req.state = State.RUNNING
+    return True
+
+
+@torch.no_grad()
 def decode_step(lm: LoadedModel, pool: BlockPool, running: list):
     # One decode token for every running request. Dense ops batched; attention
     # read/write per-request (ragged lengths, no padding).

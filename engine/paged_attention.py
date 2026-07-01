@@ -11,6 +11,19 @@ from engine.model import ArchDims
 from engine.triton_paged_attention import paged_decode
 
 
+def _mask(t: int, start_pos: int, device):
+    # Attention mask for the current tokens vs all cached keys.
+    #  t == 1 (decode): attend everything -> None.
+    #  start_pos == 0 (full prefill): square causal -> handled by is_causal.
+    #  chunk (start_pos > 0, t > 1): query i attends keys 0..start_pos+i.
+    if t == 1 or start_pos == 0:
+        return None
+    total = start_pos + t
+    row = torch.arange(t, device=device).unsqueeze(1)
+    col = torch.arange(total, device=device).unsqueeze(0)
+    return col <= (start_pos + row)
+
+
 def _write(pool: BlockPool, req: PagedKVCache, layer: int, k_new, v_new, start_pos: int):
     # Place each new token's k/v at its (block, offset).
     t = k_new.shape[2]
@@ -52,8 +65,7 @@ def paged_attention(hidden, attn_module, cos, sin, dims: ArchDims, pool, req, la
         k_full, v_full = _gather(pool, req, layer, total)
         k_full = repeat_kv(k_full, dims.n_rep)
         v_full = repeat_kv(v_full, dims.n_rep)
-        is_causal = start_pos == 0
-        out = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=is_causal)
+        out = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=_mask(t, start_pos, hidden.device), is_causal=(t > 1 and start_pos == 0))
 
     out = out.transpose(1, 2).reshape(b, t, dims.n_q_heads * dims.head_dim)
     return attn_module.o_proj(out)

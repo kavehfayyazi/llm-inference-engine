@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from engine.batch import decode_step, prefill
+from engine.batch import decode_step, prefill, prefill_chunk
 from engine.blocks import BlockPool
 from engine.generate import _eos_ids
 from engine.metrics import now
@@ -20,6 +20,7 @@ class Scheduler:
         self.pool = pool
         self.max_batch = max_batch
         self.eos_ids = _eos_ids(lm)
+        self.chunk = lm.cfg.prefill_chunk
         self._start = 0.0
         self._live_sum = 0     # actual cached tokens, summed over steps
         self._padded_sum = 0   # tokens a dense [B, max_len] layout would reserve
@@ -135,18 +136,38 @@ class ContinuousScheduler(Scheduler):
     def run(self, requests):
         self._start = now(self.lm.device)
         ready = deque(sorted(requests, key=lambda r: r.arrival))
-        running, done, step = [], [], 0
-        while ready or running:
-            # Top up the running set every step (token-level admission).
-            while ready and len(running) < self.max_batch and ready[0].arrival <= step:
+        prefilling, running, done, step = [], [], [], 0
+        while ready or prefilling or running:
+            # Admit up to capacity; new requests enter chunked prefill.
+            while ready and (len(prefilling) + len(running)) < self.max_batch and ready[0].arrival <= step:
                 req = ready.popleft()
-                if self._admit(req, done, step):
-                    running.append(req)
-            if not running:
+                req.state = State.PREFILL
+                prefilling.append(req)
+            if not prefilling and not running:
                 step += 1  # nothing ready yet; advance to next arrival
                 continue
-            self._record(running)
-            decode_step(self.lm, self.pool, running)
+
+            # Advance each prefilling request by one prompt chunk this step.
+            still = []
+            for req in prefilling:
+                if not prefill_chunk(self.lm, self.pool, req, self.chunk):
+                    still.append(req)
+                    continue
+                req.t_first = self._elapsed()
+                req.s_first = step
+                if self.finished(req):
+                    req.state = State.DONE
+                    req.t_finish = self._elapsed()
+                    req.s_finish = step
+                    req.kv.release()
+                    done.append(req)
+                else:
+                    running.append(req)
+            prefilling = still
+
+            if running:
+                self._record(running)
+                decode_step(self.lm, self.pool, running)
             step += 1
             running = self._drain_finished(running, done, step)
         return done, {"steps": step, "wall_s": self._elapsed(), **self._kv_metrics()}

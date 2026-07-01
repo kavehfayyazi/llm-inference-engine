@@ -19,3 +19,5 @@ class EngineConfig:
     attention_backend: str = "reference"
     # Batching policy: "continuous" (default), "dynamic", or "static".
     scheduler: str = "continuous"
+    # Prompt tokens prefilled per step under chunked prefill.
+    prefill_chunk: int = 16
