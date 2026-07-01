@@ -67,13 +67,18 @@ def main():
     ap.add_argument("--rate", type=float, default=0.5, help="arrivals per step")
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--backend", default="reference", choices=["reference", "triton"])
+    ap.add_argument("--block-size", type=int, default=None)
     args = ap.parse_args()
 
-    lm = load(EngineConfig(attention_backend=args.backend))
+    cfg = EngineConfig(attention_backend=args.backend)
+    if args.block_size:
+        cfg.block_size = args.block_size
+    lm = load(cfg)
     arrivals = make_arrivals(args.n, args.rate, seed=0)
     print(f"device={lm.device} backend={args.backend} n={args.n} rate={args.rate}/step batch={args.batch}\n")
 
-    header = f"{'scheduler':<11} {'makespan':>9} {'ttft_stp':>9} {'lat_p99':>8} {'lat_mean':>9} {'req/step':>9} {'pool':>7}"
+    header = (f"{'scheduler':<11} {'makespan':>9} {'ttft_stp':>9} {'lat_p99':>8} {'req/step':>9} "
+              f"{'pad_waste':>10} {'paged_frag':>11} {'pool':>7}")
     print(header)
     print("-" * len(header))
     for name, cls in SCHEDULERS:
@@ -83,8 +88,8 @@ def main():
         latency = [r.s_finish - r.arrival for r in done]
         makespan = stats["steps"]
         print(f"{name:<11} {makespan:>9} {sum(ttft) / len(ttft):>9.1f} "
-              f"{percentile(latency, 99):>8} {sum(latency) / len(latency):>9.1f} "
-              f"{args.n / makespan:>9.3f} {pool.peak_used}/{pool.num_blocks:>3}")
+              f"{percentile(latency, 99):>8} {args.n / makespan:>9.3f} "
+              f"{stats['pad_waste_pct']:>9}% {stats['frag_pct']:>10}% {pool.peak_used}/{pool.num_blocks:>3}")
 
 
 if __name__ == "__main__":

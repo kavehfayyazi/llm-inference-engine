@@ -21,12 +21,30 @@ class Scheduler:
         self.max_batch = max_batch
         self.eos_ids = _eos_ids(lm)
         self._start = 0.0
+        self._live_sum = 0     # actual cached tokens, summed over steps
+        self._padded_sum = 0   # tokens a dense [B, max_len] layout would reserve
+        self._paged_sum = 0    # tokens paging actually reserves (blocks * block_size)
 
     def finished(self, req) -> bool:
         return req.last_token in self.eos_ids or len(req.generated) >= req.max_new
 
     def _elapsed(self) -> float:
         return now(self.lm.device) - self._start
+
+    def _record(self, running):
+        # Snapshot batch KV footprint each step. A padded/pre-allocated batcher
+        # reserves each slot's full max length (prompt + max_new) for the whole
+        # run; paging allocates blocks on demand as the sequence grows.
+        if not running:
+            return
+        self._live_sum += sum(r.kv.live_tokens() for r in running)
+        self._padded_sum += sum(r.prompt_ids.shape[1] + r.max_new for r in running)
+        self._paged_sum += sum(r.kv.reserved_tokens() for r in running)
+
+    def _kv_metrics(self):
+        def waste(reserved):
+            return round(100 * (1 - self._live_sum / reserved), 1) if reserved else 0.0
+        return {"pad_waste_pct": waste(self._padded_sum), "frag_pct": waste(self._paged_sum)}
 
     def _admit(self, req, done, step):
         # Prefill (emits first token); stamp first-token time/step; route.
@@ -60,6 +78,7 @@ class Scheduler:
         # Whole-batch execution: decode until every request finishes.
         running = [r for r in batch if self._admit(r, done, step)]
         while running:
+            self._record(running)
             decode_step(self.lm, self.pool, running)
             step += 1
             running = self._drain_finished(running, done, step)
@@ -81,7 +100,7 @@ class StaticScheduler(Scheduler):
                 batch.append(ready.popleft())
             step = self._run_to_completion(batch, done, step)
             batches += 1
-        return done, {"steps": step, "batches": batches, "wall_s": self._elapsed()}
+        return done, {"steps": step, "batches": batches, "wall_s": self._elapsed(), **self._kv_metrics()}
 
 
 class DynamicScheduler(Scheduler):
@@ -109,7 +128,7 @@ class DynamicScheduler(Scheduler):
                 batch.append(ready.popleft())
             step = self._run_to_completion(batch, done, step)
             batches += 1
-        return done, {"steps": step, "batches": batches, "wall_s": self._elapsed()}
+        return done, {"steps": step, "batches": batches, "wall_s": self._elapsed(), **self._kv_metrics()}
 
 
 class ContinuousScheduler(Scheduler):
@@ -126,10 +145,11 @@ class ContinuousScheduler(Scheduler):
             if not running:
                 step += 1  # nothing ready yet; advance to next arrival
                 continue
+            self._record(running)
             decode_step(self.lm, self.pool, running)
             step += 1
             running = self._drain_finished(running, done, step)
-        return done, {"steps": step, "wall_s": self._elapsed()}
+        return done, {"steps": step, "wall_s": self._elapsed(), **self._kv_metrics()}
 
 
 _SCHEDULERS = {
