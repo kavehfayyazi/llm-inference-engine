@@ -11,6 +11,7 @@ from engine.forward import forward_paged
 from engine.model import LoadedModel
 from engine.paged_attention import _gather
 from engine.request import Request, State
+from engine.triton_paged_attention import paged_decode_batched
 
 
 @torch.no_grad()
@@ -55,14 +56,22 @@ def decode_step(lm: LoadedModel, pool: BlockPool, running: list):
             pool.k[i][block_id, :, off, :] = k[j, :, 0, :]
             pool.v[i][block_id, :, off, :] = v[j, :, 0, :]
 
-        # Read: each query attends only its own request's KV.
-        outs = []
-        for j, r in enumerate(running):
-            k_full, v_full = _gather(pool, r.kv, i, r.pos + 1)
-            k_full = repeat_kv(k_full, dims.n_rep)
-            v_full = repeat_kv(v_full, dims.n_rep)
-            outs.append(F.scaled_dot_product_attention(q[j:j + 1], k_full, v_full, is_causal=False))
-        out = torch.cat(outs, dim=0).transpose(1, 2).reshape(n, 1, dims.n_q_heads * dims.head_dim)
+        # Read: each query attends only its own request's KV (ragged lengths).
+        if lm.cfg.attention_backend == "triton":
+            out_heads = paged_decode_batched(
+                q[:, :, 0, :], pool.k[i], pool.v[i],
+                [r.kv.block_table for r in running], [r.pos + 1 for r in running], dims.n_rep,
+            )
+            out = out_heads.view(n, dims.n_q_heads, 1, dims.head_dim)
+        else:
+            outs = []
+            for j, r in enumerate(running):
+                k_full, v_full = _gather(pool, r.kv, i, r.pos + 1)
+                k_full = repeat_kv(k_full, dims.n_rep)
+                v_full = repeat_kv(v_full, dims.n_rep)
+                outs.append(F.scaled_dot_product_attention(q[j:j + 1], k_full, v_full, is_causal=False))
+            out = torch.cat(outs, dim=0)
+        out = out.transpose(1, 2).reshape(n, 1, dims.n_q_heads * dims.head_dim)
 
         hidden = residual + layer.self_attn.o_proj(out)
         residual = hidden

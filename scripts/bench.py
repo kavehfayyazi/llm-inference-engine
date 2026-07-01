@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import math
 import os
 import sys
@@ -50,8 +51,16 @@ def build(lm):
 
 @torch.no_grad()
 def main():
-    lm = load(EngineConfig())
-    print(f"device={lm.device} dtype={lm.dtype} requests={len(SPECS)}\n")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--backend", default="reference", choices=["reference", "triton"])
+    args = ap.parse_args()
+
+    lm = load(EngineConfig(attention_backend=args.backend))
+    print(f"device={lm.device} dtype={lm.dtype} backend={args.backend} requests={len(SPECS)}\n")
+
+    # Warmup: compile kernels / autotune / cudnn before timing.
+    pool, reqs = build(lm)
+    ContinuousScheduler(lm, pool, max(BATCH_SIZES)).run(reqs)
     header = f"{'scheduler':<11} {'batch':>5} {'steps':>6} {'ttft_ms':>9} {'tpot_ms':>9} {'p99_ms':>9} {'tok/s':>7}"
     print(header)
     print("-" * len(header))
